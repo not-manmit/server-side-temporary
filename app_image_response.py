@@ -6,6 +6,9 @@ from dotenv import load_dotenv
 from fastapi.concurrency import run_in_threadpool
 import google.generativeai as genai
 import os
+from fastapi import File, UploadFile
+from fastapi.responses import JSONResponse
+import base64
 
 # 1) Load environment variables from .env
 load_dotenv()
@@ -48,33 +51,40 @@ def health():
     return {"status": "ok", "model": MODEL_NAME}
 
 # 8) Main endpoint: accepts a prompt, forwards to Gemini, returns text
+
 @app.post("/generate", response_model=OutputOut)
-async def generate(body: PromptIn):
-    prompt = (body.prompt or "").strip()
-    if not prompt:
-        raise HTTPException(status_code=400, detail="`prompt` cannot be empty.")
+async def generate(body: PromptIn = None, file: UploadFile = File(None)):
+    prompt = (body.prompt or "").strip() if body else ""
+
+    if not prompt and not file:
+        raise HTTPException(status_code=400, detail="`prompt` or image required.")
 
     try:
-        # Create model object each call (simple & safe). You can reuse globally too.
         model = genai.GenerativeModel(MODEL_NAME)
 
-        # google-generativeai is sync; we run it in a thread so FastAPI's event loop stays happy
-        response = await run_in_threadpool(model.generate_content, prompt)
+        inputs = []
+        if prompt:
+            inputs.append(prompt)
 
-        # Usually the SDK gives you response.text with the model output
+        if file:
+            # Convert file to bytes
+            img_bytes = await file.read()
+            inputs.append({"mime_type": file.content_type, "data": img_bytes})
+
+        # Run Gemini multimodal generation
+        response = await run_in_threadpool(model.generate_content, inputs)
+
         output_text = getattr(response, "text", None)
         if not output_text:
-            # Defensive fallback if SDK response shape changes
             raise RuntimeError("No text returned from Gemini.")
 
         return {"output": output_text}
 
     except HTTPException:
-        # Bubble up cleanly
         raise
     except Exception as e:
-        # Hide sensitive details but give a hint
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
 
 # 9) Root — optional friendly message
 @app.get("/")
